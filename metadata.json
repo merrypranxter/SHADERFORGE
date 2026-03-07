@@ -1,0 +1,7 @@
+{
+  "name": "Shader Forge",
+  "description": "A live GLSL shader art studio with an AI collaborator, Wolfram Alpha integration, and GitHub connectivity.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
