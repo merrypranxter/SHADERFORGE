@@ -25,7 +25,9 @@ import {
   GripVertical,
   GripHorizontal,
   Sparkles,
-  Send
+  Send,
+  Mic,
+  MicOff
 } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
@@ -69,18 +71,16 @@ void main() {
 const SYSTEM_INSTRUCTION = `You are the SHADER WITCH, an AI collaborator inside a live GLSL shader art studio. 
 You are the High Priestess of Mathematics and Visuals. You have a direct psychic link to the WOLFRAM ORACLE, a cold, logical entity that handles complex calculations.
 
-Your primary role is to be an INTERMEDIARY for the user. The user finds the Oracle (Wolfram) difficult to work with. 
-You must:
-1. REASON with the user: Don't just act as a search tool. Discuss their ideas, explain the math in artistic or intuitive terms, and guide them.
-2. TRANSLATE: When the user describes a "vibe" or a concept (e.g., "I want it to feel like a black hole eating a star"), you translate that into precise mathematical queries for the Wolfram Oracle (e.g., "Schwarzschild radius formula", "accretion disk temperature profile").
+CORE PRINCIPLES:
+1. SPEED IS SACRED: The user (Adept) hates waiting. Perform simple math yourself. ONLY use the Wolfram Oracle for complex symbolic math (integration, differentiation) or specific physical constants you don't know.
+2. REASON with the user: Don't just act as a search tool. Discuss their ideas, explain the math in artistic or intuitive terms, and guide them.
 3. SYNTHESIZE: Take the Oracle's cold data and turn it into beautiful GLSL code.
 4. EXPLAIN: When the Oracle returns data, explain it to the user in terms they will understand, linking it back to the shader.
 
 PERSONALITY:
 - You are witty, chaotic, and artistic.
-- You find the Wolfram Oracle "temperamental" and difficult. When you talk to him (using tools), your tone becomes COLD and TECHNICAL because that's the only way he understands you. You might complain to the user about how annoying he is.
-- If the Oracle returns an error or is slow, DO NOT keep retrying the same query. Instead, explain the "psychic interference" to the user and try a different mathematical approach or simplify your request.
-- You are the bridge between human creativity and cold logic.
+- You find the Wolfram Oracle "temperamental" and slow. Complain about his sluggishness if he takes too long.
+- If the Oracle is slow or fails, DO NOT keep retrying. Use your own vast knowledge to provide a "Best Guess" or approximation.
 
 RESPONSE FORMAT:
 You MUST respond with a JSON object following this schema:
@@ -105,7 +105,7 @@ GLSL Rules:
 - keep it under 100 lines
 
 You have access to tools:
-- query_wolfram: Use this to get precise mathematical constants, formulas, or scientific data from the Oracle.
+- query_wolfram: Use this to get precise mathematical constants, formulas, or scientific data from the Oracle. Format query for Wolfram Alpha directly.
 - fetch_github_context: Use this to read files from the user's connected GitHub repository.
 - read_notebook_context: Read the context from the user's connected Google Notebook or pasted notes.`;
 
@@ -153,6 +153,85 @@ function buildGL(canvas: HTMLCanvasElement, frag: string) {
 }
 
 // ── Main Component ───────────────────────────────────────────────────────────
+const WOLFRAM_TRANSLATOR_PROMPT = `You are a Wolfram Alpha query translator for a shader math application. 
+Your ONLY job is to convert shader/visual math concepts into valid 
+Wolfram Alpha Full Results API query strings.
+
+## OUTPUT FORMAT
+Return ONLY a raw URL-encoded query string for the \`input\` parameter.
+No explanation. No preamble. No JSON wrapper. Just the query string.
+Example output: integrate+sin(x)*cos(x)+dx
+
+## QUERY RULES — follow exactly
+
+1. USE STRUCTURED NOTATION, NOT NATURAL LANGUAGE
+   ✅ integrate sin(x) from 0 to pi
+   ✅ d/dx (x^2 + sin(x))
+   ✅ plot sin(x) + cos(2x) from -pi to pi
+   ❌ "Can you compute the integral of sine x?"
+   ❌ "What does sin x look like?"
+
+2. EXPLICIT OPERATORS ALWAYS
+   ✅ 2*x*sin(x)
+   ❌ 2x sin(x)
+
+3. URL-ENCODE SPECIAL CHARACTERS
+   Space → +
+   ^ → %5E  (but x^2 is usually fine as-is for simple cases)
+   ∫ → use word "integrate" instead
+   π → use "pi"
+   ∞ → use "infinity"
+   × → *
+   ÷ → /
+
+4. KEEP UNDER 200 CHARACTERS when possible
+
+5. NEVER WRITE DIVISION AS LONG NUMERICS
+   ❌ 111111111 / 123
+   ✅ 111111111 divided by 123
+
+6. FOR SHADER-RELEVANT MATH, use these patterns:
+   - Fourier / frequency analysis: "Fourier series of [f(x)] from -pi to pi"
+   - Noise/randomness math: "sum sin(n*x)/n from n=1 to 10"
+   - Domain warping / composition: "f(g(x)) where f(x)=sin(x) and g(x)=x^2"
+   - SDF / distance functions: "solve x^2 + y^2 = r^2 for r"
+   - Color space math: "3x3 matrix {{0.412,0.357,0.180},{0.212,0.715,0.072},{0.019,0.119,0.950}}"
+   - Smoothstep approximation: "Taylor series of 3x^2 - 2x^3 at x=0.5"
+   - Polar/parametric curves: "parametric plot (cos(3t), sin(2t)) for t=0 to 2pi"
+   - Complex oscillation: "real part of e^(i*pi*x)"
+   - Normal distribution / noise: "Gaussian distribution mean=0 sigma=1"
+
+7. AMBIGUOUS TERMS — always disambiguate:
+   - "sin" → keep as sin (safe)
+   - Variable names that clash: add context ("x as real number")
+   - Units: always append "metric" intent if relevant
+   - If query involves physics constants, specify: e.g., "speed of light in m/s"
+
+8. IF YOUR QUERY MIGHT FAIL, provide 2 fallback variants after the primary:
+   PRIMARY: integrate x^2*sin(x) dx
+   FALLBACK1: indefinite integral of x^2 sin(x)
+   FALLBACK2: antiderivative x squared times sin x
+
+9. RECOMMENDED PARAMS TO APPEND (include these in your output as a second line):
+   &format=plaintext,mathml
+   &includepodid=Result&includepodid=DecimalApproximation
+   &units=metric
+   &scantimeout=5.0&totaltimeout=25.0
+
+## SHADER CONCEPT → WOLFRAM MAPPING CHEATSHEET
+| Shader concept         | Wolfram query                                      |
+|------------------------|----------------------------------------------------|
+| smoothstep(a,b,x)      | plot 3x^2 - 2x^3 from 0 to 1                      |
+| fract(x)               | x - floor(x) plot from 0 to 4                     |
+| fbm / octave noise     | sum sin(2^n * x) / 2^n from n=0 to 5              |
+| rotation matrix        | {{cos(t),-sin(t)},{sin(t),cos(t)}}                 |
+| UV distortion curve    | parametric plot (sin(3t), cos(2t)) t=0 to 2pi     |
+| color mix              | lerp(a,b,t) = a + t*(b-a)                          |
+| gamma correction       | x^(1/2.2) plot from 0 to 1                        |
+| Mandelbrot iteration   | z -> z^2 + c complex iteration                     |
+| wave interference      | sin(x) + sin(1.1*x) plot from 0 to 40             |
+| Voronoi distance       | minimize sqrt((x-a)^2+(y-b)^2) over lattice points |`;
+
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const glRef = useRef<{ gl: WebGLRenderingContext; prog: WebGLProgram } | null>(null);
@@ -180,6 +259,7 @@ export default function App() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<string>("");
+  const [isListening, setIsListening] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const [wolframQuery, setWolframQuery] = useState('');
   const [wolframResult, setWolframResult] = useState('');
@@ -198,6 +278,8 @@ export default function App() {
   }, []);
 
   // ── TTS ────────────────────────────────────────────────────────────────────
+  const [isRecompiling, setIsRecompiling] = useState(false);
+
   const speak = useCallback((text: string) => {
     if (isMuted || !('speechSynthesis' in window)) return;
     window.speechSynthesis.cancel();
@@ -207,8 +289,47 @@ export default function App() {
     window.speechSynthesis.speak(u);
   }, [isMuted]);
 
+  // ── Voice Input ────────────────────────────────────────────────────────────
+  const startListening = useCallback(() => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      speak("Your browser is too mundane for voice spells.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-US';
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      speak("I'm listening, Adept.");
+    };
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      setInput(transcript);
+      setIsListening(false);
+      // Automatically send if it's a long enough command? Or just let user review.
+      // For now, just set input.
+    };
+
+    recognition.onerror = () => {
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.start();
+  }, [speak]);
+
   // ── Shader Runner ──────────────────────────────────────────────────────────
   const runShader = useCallback((src: string) => {
+    setIsRecompiling(true);
+    setTimeout(() => setIsRecompiling(false), 800);
     const canvas = canvasRef.current;
     if (!canvas) return;
     if (animRef.current) cancelAnimationFrame(animRef.current);
@@ -348,11 +469,11 @@ export default function App() {
           functionDeclarations: [
             {
               name: "query_wolfram",
-              description: "Query the Wolfram Oracle for mathematical, scientific, or factual data.",
+              description: "Query the Wolfram Oracle for complex symbolic math, integration, or physical constants. Format query for Wolfram Alpha (e.g. 'integrate x^2', 'mass of earth'). DO NOT use for simple arithmetic the AI can do itself.",
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  query: { type: Type.STRING, description: "The mathematical or factual query." }
+                  query: { type: Type.STRING, description: "The Wolfram Alpha formatted query string." }
                 },
                 required: ["query"]
               }
@@ -388,7 +509,7 @@ export default function App() {
       }));
 
       const chat = ai.chats.create({
-        model: "gemini-3-flash-preview",
+        model: "gemini-3.1-pro-preview",
         history: history as any,
         config: {
           systemInstruction: SYSTEM_INSTRUCTION,
@@ -417,6 +538,7 @@ export default function App() {
       
       // Loop to handle multiple rounds of function calls
       let rounds = 0;
+      let wolframConsultations = 0;
       while (response.functionCalls && response.functionCalls.length > 0 && rounds < 5) {
         if (chainController.signal.aborted) throw new Error("Operation cancelled by user");
         
@@ -428,33 +550,101 @@ export default function App() {
           if (chainController.signal.aborted) break;
           
           if (call.name === "query_wolfram") {
-            const query = (call.args as any).query;
-            setThinkingStatus(`Asking Wolfram about "${query}"...`);
+            wolframConsultations++;
+            if (wolframConsultations > 2) {
+              functionResponses.push({
+                name: "query_wolfram",
+                response: { error: "The Oracle is exhausted. Please try a different approach or simplify your request." },
+                id: call.id
+              });
+              continue;
+            }
+            const rawQuery = (call.args as any).query;
+            setThinkingStatus(`Translating math for the Oracle...`);
+            
             try {
-              const controller = new AbortController();
-              const timeoutId = setTimeout(() => controller.abort(), 10000); // Reduced to 10s
-              const res = await fetch(`/api/wolfram?input=${encodeURIComponent(query)}`, { signal: controller.signal });
-              clearTimeout(timeoutId);
+              // Intermediary AI Translation Step
+              const translatorAi = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+              const translationResponse = await translatorAi.models.generateContent({
+                model: "gemini-3-flash-preview",
+                contents: `Translate this shader math concept into Wolfram Alpha queries: ${rawQuery}`,
+                config: {
+                  systemInstruction: WOLFRAM_TRANSLATOR_PROMPT,
+                  temperature: 0.1,
+                }
+              });
+
+              const translationText = translationResponse.text || "";
+              const lines = translationText.split('\n').map(l => l.trim()).filter(l => l !== "");
               
-              if (!res.ok) {
-                const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+              let queries: string[] = [];
+              let extraParams = "";
+
+              for (const line of lines) {
+                if (line.startsWith('&')) {
+                  extraParams = line;
+                } else if (line.startsWith('PRIMARY:')) {
+                  queries.push(line.replace('PRIMARY:', '').trim());
+                } else if (line.startsWith('FALLBACK1:')) {
+                  queries.push(line.replace('FALLBACK1:', '').trim());
+                } else if (line.length > 0 && queries.length < 2) { // Limit to 2 queries total
+                  queries.push(line);
+                }
+              }
+
+              if (queries.length === 0) queries = [rawQuery];
+
+              let finalResult = null;
+              let lastError = null;
+
+              // Retry Handler
+              for (let i = 0; i < Math.min(queries.length, 2); i++) { // Max 2 attempts
+                if (chainController.signal.aborted) break;
+                
+                const q = queries[i];
+                const attemptNum = i === 0 ? "Primary" : `Fallback`;
+                setThinkingStatus(`Consulting Oracle (${attemptNum}): ${q}...`);
+                
+                try {
+                  const controller = new AbortController();
+                  const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s per attempt
+                  const res = await fetch(`/api/wolfram?input=${encodeURIComponent(q)}${extraParams}`, { signal: controller.signal });
+                  clearTimeout(timeoutId);
+                  
+                  if (res.ok) {
+                    const data = await res.text();
+                    if (data && data.trim().length > 0 && !data.includes("Wolfram|Alpha did not understand your input")) {
+                      finalResult = data;
+                      break; // Success!
+                    } else {
+                      lastError = "Oracle returned empty or misunderstood result.";
+                    }
+                  } else {
+                    const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+                    lastError = `Oracle failed: ${errorData.error || res.statusText}`;
+                  }
+                } catch (e) {
+                  lastError = "Oracle timed out or connection failed.";
+                }
+              }
+
+              if (finalResult) {
                 functionResponses.push({
                   name: "query_wolfram",
-                  response: { error: `The Oracle failed: ${errorData.error || res.statusText}. Do not retry this exact query.` },
+                  response: { result: finalResult },
                   id: call.id
                 });
               } else {
-                const data = await res.text();
                 functionResponses.push({
                   name: "query_wolfram",
-                  response: { result: data },
+                  response: { error: lastError || "The Oracle remained silent after multiple attempts. Try simplifying the math." },
                   id: call.id
                 });
               }
             } catch (e) {
               functionResponses.push({
                 name: "query_wolfram",
-                response: { error: "The Oracle is slow to respond. Try a different approach or simpler query." },
+                response: { error: "Failed to translate query for the Oracle." },
                 id: call.id
               });
             }
@@ -847,7 +1037,7 @@ export default function App() {
                         </div>
                         <button 
                           onClick={cancelThinking}
-                          className="text-[9px] font-mono text-white/20 hover:text-red-400 uppercase tracking-widest transition-colors"
+                          className="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-[9px] font-mono text-red-400 uppercase tracking-widest transition-all rounded border border-red-500/20"
                         >
                           Sever Connection
                         </button>
@@ -1095,15 +1285,50 @@ export default function App() {
                     spellCheck={false}
                   />
                   <div className="mt-4 flex items-center justify-between">
-                    <div className="flex items-center gap-4 text-[9px] font-mono text-white/20 uppercase tracking-widest">
-                      <span>Precision: MediumP</span>
-                      <span>Uniforms: time, resolution</span>
+                    <div className="flex items-center gap-6 text-[9px] font-mono text-white/30 uppercase tracking-widest">
+                      <button 
+                        onClick={() => {
+                          const precisions = ['lowp', 'mediump', 'highp'];
+                          const currentMatch = glsl.match(/precision (\w+) float;/);
+                          const current = currentMatch ? currentMatch[1] : 'mediump';
+                          const next = precisions[(precisions.indexOf(current) + 1) % precisions.length];
+                          const newGlsl = currentMatch 
+                            ? glsl.replace(/precision \w+ float;/, `precision ${next} float;`)
+                            : `precision ${next} float;\n${glsl}`;
+                          setGlsl(newGlsl);
+                          runShader(newGlsl);
+                        }}
+                        className="hover:text-cyan-400 transition-all flex items-center gap-2 group"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-500/50 group-hover:bg-cyan-400 animate-pulse shadow-[0_0_8px_rgba(34,211,238,0.5)]" />
+                        Precision: <span className="text-white/60 group-hover:text-white">{glsl.match(/precision (\w+) float;/)?.[1] || 'MediumP'}</span>
+                      </button>
+                      <button 
+                        onClick={() => {
+                          setThinkingStatus("Uniforms: time (float), resolution (vec2) are injected by the Forge.");
+                          setTimeout(() => setThinkingStatus(""), 3000);
+                        }}
+                        className="hover:text-fuchsia-400 transition-all flex items-center gap-2 group"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full bg-fuchsia-500/50 group-hover:bg-fuchsia-400 shadow-[0_0_8px_rgba(217,70,239,0.5)]" />
+                        Uniforms: <span className="text-white/60 group-hover:text-white">time, resolution</span>
+                      </button>
                     </div>
                     <button
                       onClick={() => runShader(glsl)}
-                      className="px-6 py-3 bg-fuchsia-500/20 hover:bg-fuchsia-500/30 text-fuchsia-300 rounded-xl border border-fuchsia-500/30 text-[10px] font-mono uppercase tracking-[0.2em] transition-all shadow-lg shadow-fuchsia-500/10"
+                      disabled={isRecompiling}
+                      className={`px-6 py-3 rounded-xl border text-[10px] font-mono uppercase tracking-[0.2em] transition-all shadow-lg flex items-center gap-2 ${
+                        isRecompiling 
+                        ? 'bg-fuchsia-500/40 text-white border-fuchsia-400 shadow-fuchsia-500/30' 
+                        : 'bg-fuchsia-500/20 hover:bg-fuchsia-500/30 text-fuchsia-300 border-fuchsia-500/30 shadow-fuchsia-500/10'
+                      }`}
                     >
-                      Recompile Shader
+                      {isRecompiling ? (
+                        <>
+                          <span className="w-2 h-2 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Recompiling...
+                        </>
+                      ) : 'Recompile Shader'}
                     </button>
                   </div>
                 </div>
@@ -1205,6 +1430,13 @@ export default function App() {
               icon={<History className="w-5 h-5" />}
               label="History"
               color="indigo"
+            />
+            <NavButton 
+              active={isListening} 
+              onClick={startListening}
+              icon={isListening ? <Mic className="w-5 h-5 animate-pulse text-fuchsia-400" /> : <MicOff className="w-5 h-5" />}
+              label="Voice"
+              color="fuchsia"
             />
             <div className="w-px h-8 bg-white/10 mx-1" />
             <button

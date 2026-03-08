@@ -1,10 +1,14 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
+import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
 
 dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
@@ -27,7 +31,7 @@ async function startServer() {
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout on server
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout on server
       const response = await fetch(
         `https://api.wolframalpha.com/v1/result?appid=${appId}&i=${encodeURIComponent(query as string)}`,
         { signal: controller.signal as any }
@@ -39,21 +43,29 @@ async function startServer() {
       if ((error as any).name === 'AbortError') {
         res.status(504).json({ error: "Wolfram Alpha timed out" });
       } else {
+        console.error("Wolfram Proxy Error:", error);
         res.status(500).json({ error: "Failed to fetch from Wolfram Alpha" });
       }
     }
   });
 
-  // GitHub Proxy (Optional, for searching or fetching files if needed)
+  // GitHub Proxy
   app.get("/api/github/repo", async (req, res) => {
     const { owner, repo, path: filePath } = req.query;
+    if (!owner || !repo) {
+      return res.status(400).json({ error: "Owner and repo are required" });
+    }
     try {
       const response = await fetch(
         `https://api.github.com/repos/${owner}/${repo}/contents/${filePath || ""}`
       );
+      if (!response.ok) {
+        return res.status(response.status).json({ error: `GitHub API error: ${response.statusText}` });
+      }
       const data = await response.json();
       res.json(data);
     } catch (error) {
+      console.error("GitHub Proxy Error:", error);
       res.status(500).json({ error: "Failed to fetch from GitHub" });
     }
   });
