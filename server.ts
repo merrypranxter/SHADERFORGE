@@ -16,28 +16,42 @@ async function startServer() {
 
   app.use(express.json());
 
-  // Wolfram Alpha Proxy
+// Wolfram Alpha Proxy
+  const wolframCache = new Map<string, { data: string, ts: number }>();
+  const CACHE_TTL = 1000 * 60 * 60; // 1 hour
+
   app.get("/api/wolfram", async (req, res) => {
-    const query = req.query.input;
+    const query = req.query.input as string;
     const appId = process.env.WOLFRAM_APP_ID;
 
     if (!appId) {
       return res.status(500).json({ error: "Wolfram AppID not configured" });
     }
 
-    if (!query || typeof query !== 'string' || query.trim() === '') {
+    if (!query || query.trim() === '') {
       return res.status(400).json({ error: "Query parameter is required" });
+    }
+
+    // Check cache
+    const cached = wolframCache.get(query);
+    if (cached && Date.now() - cached.ts < CACHE_TTL) {
+      console.log(`Wolfram Cache Hit: ${query}`);
+      return res.send(cached.data);
     }
 
     try {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout on server
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // Increased to 30s
       const response = await fetch(
-        `https://api.wolframalpha.com/v1/result?appid=${appId}&i=${encodeURIComponent(query as string)}`,
+        `https://api.wolframalpha.com/v1/result?appid=${appId}&i=${encodeURIComponent(query)}`,
         { signal: controller.signal as any }
       );
       clearTimeout(timeoutId);
       const data = await response.text();
+      
+      // Store in cache
+      wolframCache.set(query, { data, ts: Date.now() });
+      
       res.send(data);
     } catch (error) {
       if ((error as any).name === 'AbortError') {
