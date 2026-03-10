@@ -28,7 +28,9 @@ import {
   Sparkles,
   Send,
   Mic,
-  MicOff
+  MicOff,
+  Star,
+  Plus
 } from "lucide-react";
 import Markdown from "react-markdown";
 import { motion, AnimatePresence } from "motion/react";
@@ -253,12 +255,12 @@ const SYSTEM_INSTRUCTION = `You are the SHADER WITCH, a witty, chaotic AI collab
 You have a psychic link to the WOLFRAM ORACLE (complex math) and a MEMORY GRIMOIRE (user preferences/techniques).
 
 CORE RULES:
-1. FORMAT: Your response should ideally be a JSON object, but you can include artistic commentary. 
-2. FORGE: When creating/updating visuals, ALWAYS include a JSON block with "forge" (vibe and glsl) and "message".
+1. FORMAT: Your response MUST be a valid JSON object. Do not include text outside the JSON block.
+2. FORGE: When creating/updating visuals, include "forge" (vibe and glsl) and "message".
 3. SPEED: Perform simple math yourself. Use Wolfram only for symbolic calculus or constants.
 4. NO LISTING: Never list your internal memory or grimoire to the user unless explicitly asked. Focus on the art.
 
-RESPONSE TEMPLATE (JSON):
+STRICT JSON TEMPLATE:
 {
   "message": "Artistic/witty response.",
   "forge": {
@@ -430,6 +432,7 @@ export default function App() {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [isAiThinking, setIsAiThinking] = useState(false);
   const [thinkingStatus, setThinkingStatus] = useState<string>("");
+  const [showCookieError, setShowCookieError] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const [wolframQuery, setWolframQuery] = useState('');
@@ -473,6 +476,26 @@ export default function App() {
     u.pitch = 0.8; // Witchy pitch
     window.speechSynthesis.speak(u);
   }, [isMuted]);
+
+  const isCookieCheckResponse = (text: string) => {
+    return typeof text === 'string' && (text.includes("<title>Cookie check</title>") || text.includes("aistudio_auth_flow_may_set_cookies"));
+  };
+
+  const handleToolError = (callName: string, errorText: string, callId: string) => {
+    if (isCookieCheckResponse(errorText)) {
+      setShowCookieError(true);
+      return {
+        name: callName,
+        response: { error: "The platform's security layer is blocking this request. Please click the 'FIX CONNECTION' button in the header or open the app in a new tab to re-authenticate." },
+        id: callId
+      };
+    }
+    return {
+      name: callName,
+      response: { error: errorText },
+      id: callId
+    };
+  };
 
   // ── Voice Input ────────────────────────────────────────────────────────────
   const startListening = useCallback(() => {
@@ -646,48 +669,83 @@ export default function App() {
     const chainController = new AbortController();
     abortControllerRef.current = chainController;
 
-    const safeSendMessage = async (chat: any, msg: any, timeoutMs = 300000) => {
-      const timeoutPromise = new Promise((_, reject) => {
-        const id = setTimeout(() => reject(new Error("The Oracle is lost in the void. The connection dissipated. Try a simpler request.")), timeoutMs);
-        chainController.signal.addEventListener('abort', () => {
-          clearTimeout(id);
-          reject(new Error("Operation cancelled by user"));
+    const safeSendMessage = async (chat: any, msg: any, timeoutMs = 90000) => {
+      const maxRetries = 3;
+      let retryCount = 0;
+
+      const attempt = async (): Promise<any> => {
+        const timeoutPromise = new Promise((_, reject) => {
+          const id = setTimeout(() => reject(new Error("The Oracle is lost in the void (Timeout). The connection dissipated. Try a simpler request or wait a moment.")), timeoutMs);
+          chainController.signal.addEventListener('abort', () => {
+            clearTimeout(id);
+            reject(new Error("Operation cancelled by user"));
+          });
         });
-      });
 
-      // Use streaming to keep the connection alive and provide feedback
-      const streamPromise = (async () => {
-        const result = await chat.sendMessageStream(msg);
-        let fullText = "";
-        let allFunctionCalls: any[] = [];
-        
-        for await (const chunk of result) {
-          if (chainController.signal.aborted) throw new Error("Operation cancelled by user");
-          
-          if (chunk.text) {
-            fullText += chunk.text;
+        // Use streaming to keep the connection alive and provide feedback
+        const streamPromise = (async () => {
+          try {
+            const result = await chat.sendMessageStream(msg);
+            let fullText = "";
+            let allFunctionCalls: any[] = [];
+            
+            for await (const chunk of result) {
+              if (chainController.signal.aborted) throw new Error("Operation cancelled by user");
+              
+              if (chunk.text) {
+                fullText += chunk.text;
+              }
+              
+              if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+                allFunctionCalls.push(...chunk.functionCalls);
+              }
+              
+              // Provide visual feedback of progress
+              setThinkingStatus(`Channeling... ${fullText.length > 0 ? 'Receiving vision...' : 'Waiting for Oracle...'}`);
+            }
+            
+            return { text: fullText, functionCalls: allFunctionCalls.length > 0 ? allFunctionCalls : undefined };
+          } catch (e) {
+            throw e;
           }
-          
-          if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-            allFunctionCalls.push(...chunk.functionCalls);
+        })();
+
+        return Promise.race([
+          streamPromise,
+          timeoutPromise
+        ]) as Promise<any>;
+      };
+
+      while (true) {
+        try {
+          return await attempt();
+        } catch (e: any) {
+          const errorStr = (e.message || String(e)).toLowerCase();
+          const isRetryable = errorStr.includes("503") || 
+                            errorStr.includes("429") ||
+                            errorStr.includes("high demand") || 
+                            errorStr.includes("unavailable") ||
+                            errorStr.includes("overloaded") ||
+                            errorStr.includes("timeout") ||
+                            errorStr.includes("deadline exceeded");
+
+          if (isRetryable && retryCount < maxRetries) {
+            retryCount++;
+            const delay = Math.pow(2, retryCount) * 2000 + Math.random() * 1000;
+            setThinkingStatus(`Oracle is busy or timed out. Retrying in ${Math.round(delay/1000)}s... (Attempt ${retryCount}/${maxRetries})`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
           }
-          
-          // Provide visual feedback of progress
-          setThinkingStatus(`Channeling... ${fullText.length} bytes received`);
+          throw e;
         }
-        
-        return { text: fullText, functionCalls: allFunctionCalls.length > 0 ? allFunctionCalls : undefined };
-      })();
-
-      return Promise.race([
-        streamPromise,
-        timeoutPromise
-      ]) as Promise<any>;
+      }
     };
 
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
       
+      // Use Pro for complex reasoning and tool use
+      const modelName = "gemini-3.1-pro-preview";
       const tools = [
         {
           functionDeclarations: [
@@ -751,7 +809,7 @@ Inspirations: ${memory.inspirations.slice(-10).join('; ') || 'None yet'}
 Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
 
       const chat = ai.chats.create({
-        model: "gemini-3-flash-preview",
+        model: modelName,
         history: history as any,
         config: {
           systemInstruction: `${SYSTEM_INSTRUCTION}\n\nCURRENT MEMORY STATE:\n${memoryContext}`,
@@ -812,6 +870,11 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
               
               if (res.ok) {
                 const data = await res.text();
+                if (isCookieCheckResponse(data)) {
+                  functionResponses.push(handleToolError("query_wolfram", data, call.id));
+                  continue;
+                }
+                
                 if (data && data.trim().length > 0 && !data.includes("Wolfram|Alpha did not understand your input")) {
                   // Truncate large results
                   finalResult = data.length > 3000 ? data.slice(0, 3000) + "... [Truncated]" : data;
@@ -819,7 +882,19 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
                   lastError = "Oracle returned empty or misunderstood result. Try rephrasing the math.";
                 }
               } else {
-                const errorData = await res.json().catch(() => ({ error: "Unknown error" }));
+                const text = await res.text();
+                if (isCookieCheckResponse(text)) {
+                  functionResponses.push(handleToolError("query_wolfram", text, call.id));
+                  continue;
+                }
+                
+                let errorData;
+                try {
+                  errorData = JSON.parse(text);
+                } catch(e) {
+                  errorData = { error: text || "Unknown error" };
+                }
+
                 if (res.status === 500 && errorData.error?.includes("not configured")) {
                   lastError = "The Wolfram Oracle has not been configured with an AppID. Please set WOLFRAM_APP_ID in the environment.";
                 } else {
@@ -861,11 +936,16 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
                 clearTimeout(timeoutId);
                 
                 if (!res.ok) {
-                  functionResponses.push({
-                    name: "fetch_github_context",
-                    response: { error: `Failed to fetch from GitHub: ${res.statusText}` },
-                    id: call.id
-                  });
+                  const text = await res.text();
+                  if (isCookieCheckResponse(text)) {
+                    functionResponses.push(handleToolError("fetch_github_context", text, call.id));
+                  } else {
+                    functionResponses.push({
+                      name: "fetch_github_context",
+                      response: { error: `Failed to fetch from GitHub: ${res.statusText}` },
+                      id: call.id
+                    });
+                  }
                 } else {
                   const data = await res.json();
                   const stringified = JSON.stringify(data);
@@ -949,54 +1029,56 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
 
       try {
         // Try to parse the whole text as JSON
-        let parsed;
+        let parsed = null;
         try {
           parsed = JSON.parse(text);
         } catch (e) {
           // If direct parse fails, try to extract JSON block
           const jsonMatch = text.match(/\{[\s\S]*\}/);
           if (jsonMatch) {
-            parsed = JSON.parse(jsonMatch[0]);
-          } else {
-            throw new Error("No JSON found");
+            try {
+              parsed = JSON.parse(jsonMatch[0]);
+            } catch (e2) {
+              console.warn("[ShaderForge] Failed to parse extracted JSON block", e2);
+            }
           }
         }
 
-        const assistantMessage = parsed.message || "";
-        
-        if (parsed.forge && parsed.forge.glsl) {
-          const code = parsed.forge.glsl.replace(/```[\w]*/g, '').replace(/```/g, '').trim();
-          setGlsl(code);
-          setHistory(h => [{ vibe: parsed.forge.vibe || 'custom', code, ts: Date.now() }, ...h].slice(0, 10));
-          startRef.current = Date.now();
-          setIsForging(true);
-          setTimeout(() => {
-            runShader(code);
-            setIsForging(false);
-          }, 50);
-          speak("Shader forged.");
+        if (parsed && (parsed.forge || parsed.message)) {
+          const assistantMessage = parsed.message || "";
           
-          const finalContent = assistantMessage ? `${assistantMessage}\n\n**Forged:** "${parsed.forge.vibe}"` : `Forged: "${parsed.forge.vibe}"`;
-          setMessages(m => [...m, { role: 'assistant', content: finalContent }]);
-        } else {
-          if (assistantMessage) {
+          if (parsed.forge && parsed.forge.glsl) {
+            const code = parsed.forge.glsl.replace(/```[\w]*/g, '').replace(/```/g, '').trim();
+            setGlsl(code);
+            setHistory(h => [{ vibe: parsed.forge.vibe || 'custom', code, ts: Date.now() }, ...h].slice(0, 10));
+            startRef.current = Date.now();
+            setIsForging(true);
+            setTimeout(() => {
+              runShader(code);
+              setIsForging(false);
+            }, 50);
+            speak("Shader forged.");
+            
+            const finalContent = assistantMessage ? `${assistantMessage}\n\n**Forged:** "${parsed.forge.vibe}"` : `Forged: "${parsed.forge.vibe}"`;
+            setMessages(m => [...m, { role: 'assistant', content: finalContent }]);
+            return; // Success!
+          } else if (assistantMessage) {
             setMessages(m => [...m, { role: 'assistant', content: assistantMessage }]);
             speak(assistantMessage.slice(0, 150));
-          } else {
-            setMessages(m => [...m, { role: 'assistant', content: "The Oracle is silent, but the energies are shifting..." }]);
+            return; // Success (message only)
           }
         }
-      } catch (e) {
-        console.error("Failed to parse shader JSON, attempting regex extraction", e);
+
+        // Fallback to robust regex extraction if JSON parsing failed or was incomplete
+        console.log("[ShaderForge] JSON parsing failed or incomplete, attempting robust regex extraction");
         
-        // Robust regex extraction for truncated or malformed JSON
         // 1. Try to find GLSL code blocks first (most reliable)
-        const glslBlockMatch = text.match(/```(?:glsl|cpp|c|hlsl)?\s*([\s\S]*?)```/);
-        const glslPropertyMatch = text.match(/"glsl"\s*:\s*"([\s\S]*?)"/);
+        const glslBlockMatch = text.match(/```(?:glsl|cpp|c|hlsl)?\s*([\s\S]*?)```/i);
+        const glslPropertyMatch = text.match(/"glsl"\s*:\s*"([\s\S]*?)"/i);
         
         // 2. Try to find vibe and message
-        const vibeMatch = text.match(/"vibe"\s*:\s*"([\s\S]*?)"/);
-        const messageMatch = text.match(/"message"\s*:\s*"([\s\S]*?)"/);
+        const vibeMatch = text.match(/"vibe"\s*:\s*"([\s\S]*?)"/i);
+        const messageMatch = text.match(/"message"\s*:\s*"([\s\S]*?)"/i);
 
         const extractedCode = glslBlockMatch ? glslBlockMatch[1] : (glslPropertyMatch ? glslPropertyMatch[1] : null);
 
@@ -1032,19 +1114,45 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
           }
         }
         
-        // If we reach here, we really couldn't find anything
+        // If we reach here, we really couldn't find any code, so just show the text
         const cleanText = text.replace(/\\n/g, '\n').replace(/\\"/g, '"').trim();
         if (cleanText) {
           setMessages(m => [...m, { role: 'assistant', content: cleanText }]);
         } else {
           throw new Error("The Oracle left no trace of its thoughts. Try rephrasing.");
         }
+      } catch (e) {
+        console.error("[ShaderForge] Final parsing error", e);
+        throw e;
       }
     } catch (e: any) {
       if (e.message === "Operation cancelled by user") {
         setMessages(m => [...m, { role: 'assistant', content: "_The connection was severed._" }]);
       } else {
-        setMessages(m => [...m, { role: 'assistant', content: `Error: ${e.message}` }]);
+        let displayError = e.message || "An unknown disturbance occurred in the void.";
+        
+        // Clean up 503/429/JSON errors for the user
+        if (displayError.includes("503") || displayError.includes("429") || displayError.includes("UNAVAILABLE") || displayError.includes("high demand") || displayError.includes("overloaded")) {
+          displayError = "The Oracle is currently overwhelmed by high demand or quota limits. The math-energies are too turbulent to channel right now. This is a service-level issue at Google. Please wait 10-15 minutes and try your spell again.";
+        } else if (displayError.includes("timeout") || displayError.includes("void")) {
+          displayError = "The connection to the Oracle timed out. The math might be too complex or the server is struggling. Try a simpler request or check your internet connection.";
+        } else if (displayError.includes("{\"error\"")) {
+          try {
+            const parsed = JSON.parse(displayError);
+            if (parsed.error?.message) {
+              const innerMessage = parsed.error.message;
+              if (innerMessage.includes("503") || innerMessage.includes("high demand")) {
+                displayError = "The Oracle is currently overwhelmed by high demand. The math-energies are too turbulent to channel right now. Please wait a few minutes and try your spell again.";
+              } else {
+                displayError = innerMessage;
+              }
+            }
+          } catch (p) {
+            // Fallback
+          }
+        }
+
+        setMessages(m => [...m, { role: 'assistant', content: `**Oracle Disturbance:** ${displayError}` }]);
       }
     } finally {
       setIsChatLoading(false);
@@ -1103,6 +1211,32 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
     }
   };
 
+  const saveCurrentToInspirations = () => {
+    if (!glsl) return;
+    const currentVibe = history[0]?.vibe || "Unnamed Essence";
+    const entry = `Vibe: ${currentVibe} | Code Snippet: ${glsl.slice(0, 300)}...`;
+    setMemory(prev => ({
+      ...prev,
+      inspirations: [...new Set([...prev.inspirations, entry])].slice(-15)
+    }));
+    speak("Vibe saved to inspirations.");
+  };
+
+  const addManualPreference = (text: string) => {
+    if (!text.trim()) return;
+    setMemory(prev => ({
+      ...prev,
+      preferences: [...new Set([...prev.preferences, text.trim()])].slice(-15)
+    }));
+  };
+
+  const addManualInspiration = (text: string) => {
+    if (!text.trim()) return;
+    setMemory(prev => ({
+      ...prev,
+      inspirations: [...new Set([...prev.inspirations, text.trim()])].slice(-15)
+    }));
+  };
   const exportChat = () => {
     const content = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n---\n\n');
     const blob = new Blob([content], { type: 'text/plain' });
@@ -1146,11 +1280,29 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
             </motion.div>
           )}
           <button 
+            onClick={saveCurrentToInspirations}
+            className="p-3 rounded-xl bg-black/40 backdrop-blur-md border border-white/10 hover:bg-white/10 transition-all shadow-xl group pointer-events-auto"
+            title="Save current shader to Inspirations"
+          >
+            <Star className="w-5 h-5 text-amber-400 group-hover:fill-amber-400 transition-all" />
+          </button>
+          <button 
             onClick={() => setIsMuted(!isMuted)}
             className="p-3 rounded-xl bg-black/40 backdrop-blur-md border border-white/10 hover:bg-white/10 transition-all shadow-xl"
           >
             {isMuted ? <VolumeX className="w-5 h-5 text-zinc-500" /> : <Volume2 className="w-5 h-5 text-fuchsia-400" />}
           </button>
+
+          {showCookieError && (
+            <button 
+              onClick={() => window.open(window.location.href, '_blank')}
+              className="px-4 py-2 rounded-xl bg-red-500/20 border border-red-500/40 text-red-400 text-xs font-mono shadow-lg animate-pulse flex items-center gap-2"
+              title="Fix Connection Issues"
+            >
+              <Zap className="w-4 h-4" />
+              FIX CONNECTION
+            </button>
+          )}
         </div>
       </header>
 
@@ -1233,9 +1385,20 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
                 <div className="flex-1 overflow-y-auto p-6 space-y-8 custom-scrollbar pb-12">
                   {/* Preferences */}
                   <section className="space-y-4">
-                    <div className="flex items-center space-x-2">
-                      <Sparkles className="w-4 h-4 text-fuchsia-400" />
-                      <h3 className="text-xs font-mono uppercase tracking-widest text-white/70 font-bold">User Preferences</h3>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <Sparkles className="w-4 h-4 text-fuchsia-400" />
+                        <h3 className="text-xs font-mono uppercase tracking-widest text-white/70 font-bold">User Preferences</h3>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const p = prompt("Enter a new preference (e.g. 'I love neon pink', 'Avoid grid patterns'):");
+                          if (p) addManualPreference(p);
+                        }}
+                        className="p-1 hover:bg-white/10 rounded border border-white/5 text-white/40 hover:text-fuchsia-400 transition-colors"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {memory.preferences.length === 0 ? (
@@ -1252,9 +1415,20 @@ Grimoire Snippet: ${memory.grimoire.slice(0, 800)}...`;
 
                   {/* Inspirations */}
                   <section className="space-y-4">
-                    <div className="flex items-center space-x-2">
-                      <Zap className="w-4 h-4 text-cyan-400" />
-                      <h3 className="text-xs font-mono uppercase tracking-widest text-white/70 font-bold">Inspirations</h3>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <Zap className="w-4 h-4 text-cyan-400" />
+                        <h3 className="text-xs font-mono uppercase tracking-widest text-white/70 font-bold">Inspirations</h3>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const i = prompt("Enter a new inspiration (e.g. 'Cyberpunk city at night', 'Microscopic biology'):");
+                          if (i) addManualInspiration(i);
+                        }}
+                        className="p-1 hover:bg-white/10 rounded border border-white/5 text-white/40 hover:text-cyan-400 transition-colors"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
                     </div>
                     <div className="space-y-2">
                       {memory.inspirations.length === 0 ? (
